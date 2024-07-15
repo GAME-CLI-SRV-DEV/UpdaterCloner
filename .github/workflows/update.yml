@@ -1,0 +1,109 @@
+name: Scheduled Task (Plazma/1.20.6, Upstream)
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/1 * * * *"
+
+env:
+
+  MAINfish: FISH
+  fish_REPO: GAME-CLI-SRV-DEV/PlazmaBukkit-Provisional
+  fish_BRANCH: dev/1.21
+  
+  ION: Radioactive
+  ION_REPO: GAME-CLI-SRV-DEV/Radioactive
+  ION_BRANCH: temp/1.21
+
+  JDK: 21
+
+jobs:
+  update-upstream:
+    name: Try to update upstreams
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ${{ env.ION }}
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.ION_REPO }}
+          path: ${{ env.ION }}
+          ref: ${{ env.ION_BRANCH }}
+      - name: Checkout ${{ env.pur }}
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.pur_REPO }}
+          path: ${{ env.pur }}
+          ref: ${{ env.Pur_BRANCH }}
+      - name: Checkout ${{ env.fish }}
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.fish_REPO }}
+          path: ${{ env.MAINfish }}
+          ref: ${{ env.fish_BRANCH }}
+
+      - name: Setup GraalVM
+        uses: graalvm/setup-graalvm@v1
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          java-version: ${{ env.JDK }}
+          version: latest
+          cache: 'gradle'
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/wrapper-validation-action@v1
+
+      - name: Setup Workflow
+        run: |
+          cd ${{ env.MAIN }}
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global pull.rebase true
+          ./gradlew --stacktrace
+
+      - name: Determine if an update is required
+        id: check
+        run: |
+          cd ${{ env.MAIN }}
+          paper=$(./gradlew -q --no-rebuild checkPaper)
+          purpur=$(./gradlew -q --no-rebuild checkPurpur)
+          echo "paper=$paper" >> $GITHUB_OUTPUT; echo "purpur=$purpur" >> $GITHUB_OUTPUT
+          echo "Paper: $paper, Purpur: $purpur"
+
+      - name: Update Upstream (FISH)
+        if: steps.check.outputs.paper == 'false' || steps.check.outputs.purpur == 'false'
+        run: |
+          cd ${{ env.MAIN }}
+          if ${{ steps.check.outputs.purpur }}
+            then if ${{ steps.check.outputs.paper }}; then echo; else ./gradlew --no-rebuild --stacktrace updateUpstream; fi
+          else ./gradlew --no-rebuild --stacktrace updateImplementation
+          fi
+          ./gradlew applyPatches --stacktrace
+      
+      - name: Rebuild Patches
+        if: steps.check.outputs.paper == 'false' || steps.check.outputs.purpur == 'false'
+        run: | 
+          cd ${{ env.MAIN }}
+          ./gradlew --no-rebuild --stacktrace rebuildPatches
+
+      - name: Test build
+        if: steps.check.outputs.paper == 'false' || steps.check.outputs.purpur == 'false'
+        run: |
+          cd ${{ env.MAIN }}
+          ./gradlew --stacktrace build
+
+      - name: Commit Changes
+        if: steps.check.outputs.paper == 'false' || steps.check.outputs.purpur == 'false'
+        run: |
+          cd ${{ env.MAIN }}
+
+          if ${{ steps.check.outputs.paper }}; then echo; else updated=Paper; fi
+          if ${{ steps.check.outputs.purpur }}; then echo; else
+            if [[ -z "$updated" ]]; then updated=Purpur; else updated="$updated, Purpur"; fi
+          fi
+
+          git add .
+          printf "Updated Upstream ($updated)\n\nUpstream has released updates that appear to apply and compile correctly\n\n$(cat compare.txt)" | git commit -F -
+          git fetch
+          git pull origin ${{ env.MAIN_BRANCH }}
+          git push origin ${{ env.MAIN_BRANCH }}
